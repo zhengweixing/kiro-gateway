@@ -934,15 +934,26 @@ async def count_tokens_endpoint(
     """
     logger.info(f"Request to /v1/messages/count_tokens (model={request_data.model}, messages={len(request_data.messages)})")
     
+    # Extract system messages from the messages array (sent by clients like Claude Code)
+    from kiro.converters_anthropic import extract_system_from_messages, extract_system_prompt
+    conversation_messages, inline_system_text = extract_system_from_messages(
+        request_data.messages
+    )
+    
     # Prepare data for tokenizer (same format as streaming message_start)
-    messages_for_tokenizer = [msg.model_dump() for msg in request_data.messages]
+    messages_for_tokenizer = [msg.model_dump() for msg in conversation_messages]
     tools_for_tokenizer = [tool.model_dump() for tool in request_data.tools] if request_data.tools else None
     
-    # Handle system prompt (can be string or list of content blocks)
-    if isinstance(request_data.system, list):
-        system_for_tokenizer = [b.model_dump() if hasattr(b, "model_dump") else b for b in request_data.system]
+    # Handle system prompt: merge dedicated system field with inline system messages
+    system_field_text = extract_system_prompt(request_data.system)
+    if system_field_text and inline_system_text:
+        combined_system = f"{system_field_text}\n{inline_system_text}"
+    elif inline_system_text:
+        combined_system = inline_system_text
     else:
-        system_for_tokenizer = request_data.system
+        combined_system = system_field_text
+    
+    system_for_tokenizer = combined_system if combined_system else None
     
     # Use the SAME estimation logic as Anthropic streaming message_start
     request_token_stats = estimate_request_tokens(

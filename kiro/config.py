@@ -250,6 +250,17 @@ MODEL_ALIASES: Dict[str, str] = {
     "auto-kiro": "auto",  # Default alias to avoid Cursor's "auto" model conflict
 }
 
+# Additional aliases from environment variable (merged with defaults above).
+# Format: comma-separated "alias:real_id" pairs
+# Example: MODEL_ALIASES_ENV=deepseek-3-2:deepseek-3.2,minimax-m2-1:minimax-m2.1
+_aliases_env = os.getenv("MODEL_ALIASES_ENV", "")
+if _aliases_env:
+    for pair in _aliases_env.split(","):
+        pair = pair.strip()
+        if ":" in pair:
+            alias, real_id = pair.split(":", 1)
+            MODEL_ALIASES[alias.strip()] = real_id.strip()
+
 # Models to hide from /v1/models endpoint.
 # These models still work when requested directly, but are not shown in the model list.
 # This is useful when you want to show only aliases instead of original model names.

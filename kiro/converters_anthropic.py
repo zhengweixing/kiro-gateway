@@ -255,6 +255,46 @@ def extract_tool_uses_from_anthropic_content(content: Any) -> List[Dict[str, Any
     return tool_calls
 
 
+def extract_system_from_messages(
+    messages: List[AnthropicMessage],
+) -> tuple:
+    """
+    Extracts system messages from the messages array.
+
+    Some clients (e.g., Claude Code) put system-role messages into the messages
+    array instead of using the dedicated system field. This function separates
+    system messages from conversation messages.
+
+    Args:
+        messages: List of Anthropic messages (may include system-role messages)
+
+    Returns:
+        Tuple of (non_system_messages, system_text):
+        - non_system_messages: Messages with system messages removed
+        - system_text: Concatenated text from all system messages (empty string if none)
+    """
+    non_system_messages: List[AnthropicMessage] = []
+    system_parts: List[str] = []
+
+    for msg in messages:
+        if msg.role == "system":
+            text = convert_anthropic_content_to_text(msg.content)
+            if text:
+                system_parts.append(text)
+        else:
+            non_system_messages.append(msg)
+
+    system_text = "\n".join(system_parts)
+
+    if system_parts:
+        logger.info(
+            f"Extracted {len(system_parts)} system message(s) from messages array "
+            f"({len(system_text)} chars)"
+        )
+
+    return non_system_messages, system_text
+
+
 def convert_anthropic_messages(
     messages: List[AnthropicMessage],
 ) -> List[UnifiedMessage]:
@@ -266,8 +306,12 @@ def convert_anthropic_messages(
     - Tool use blocks (assistant messages)
     - Tool result blocks (user messages)
 
+    Note: System messages should be extracted before calling this function
+    using extract_system_from_messages(). Any remaining system messages
+    are skipped.
+
     Args:
-        messages: List of Anthropic messages
+        messages: List of Anthropic messages (should not contain system messages)
 
     Returns:
         List of messages in unified format
@@ -281,6 +325,10 @@ def convert_anthropic_messages(
     for msg in messages:
         role = msg.role
         content = msg.content
+
+        # Skip system messages (they should be extracted before this point)
+        if role == "system":
+            continue
 
         # Extract text content
         text_content = convert_anthropic_content_to_text(content)
@@ -450,15 +498,30 @@ def anthropic_to_kiro(
     Raises:
         ValueError: If there are no messages to send
     """
-    # Convert messages to unified format
-    unified_messages = convert_anthropic_messages(request.messages)
+    # Extract system messages from the messages array (sent by clients like Claude Code)
+    conversation_messages, inline_system_text = extract_system_from_messages(
+        request.messages
+    )
+
+    # Convert messages to unified format (excluding system messages)
+    unified_messages = convert_anthropic_messages(conversation_messages)
 
     # Convert tools to unified format
     unified_tools = convert_anthropic_tools(request.tools)
 
-    # System prompt is already separate in Anthropic format!
-    # It can be a string or list of content blocks (for prompt caching)
-    system_prompt = extract_system_prompt(request.system)
+    # System prompt: merge the dedicated system field with any inline system messages
+    # Priority: dedicated system field first, then inline system messages
+    system_field_text = extract_system_prompt(request.system)
+
+    if system_field_text and inline_system_text:
+        system_prompt = f"{system_field_text}\n{inline_system_text}"
+        logger.debug(
+            "Merged system field and inline system messages into combined system prompt"
+        )
+    elif inline_system_text:
+        system_prompt = inline_system_text
+    else:
+        system_prompt = system_field_text
 
     # Get model ID for Kiro API (normalizes + resolves hidden models)
     # Pass-through principle: we normalize and send to Kiro, Kiro decides if valid
