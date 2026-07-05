@@ -77,6 +77,9 @@ from kiro.converters_core import (
 from kiro.parsers import (
     AwsEventStreamParser,
     parse_bracket_tool_calls,
+    parse_dsml_tool_calls,
+    strip_dsml_markers,
+    DSMLStreamFilter,
 )
 
 # Streaming
@@ -126,6 +129,9 @@ __all__ = [
     # Parsers
     "AwsEventStreamParser",
     "parse_bracket_tool_calls",
+    "parse_dsml_tool_calls",
+    "strip_dsml_markers",
+    "DSMLStreamFilter",
     
     # Streaming
     "stream_kiro_to_openai",

@@ -567,3 +567,262 @@ class AwsEventStreamParser:
         self.last_content = None
         self.current_tool_call = None
         self.tool_calls = []
+
+
+# ==================================================================================================
+# DeepSeek DSML Tool Call Parser
+# ==================================================================================================
+
+# DeepSeek models use a special marker format for tool calls:
+#   <｜DSML｜function_calls
+#   [{"name": "tool_name", "arguments": {...}}]
+#   <｜DSML｜>
+#
+# These markers must be detected and stripped from streaming content,
+# and converted to structured tool calls.
+
+# Match both fullwidth ｜ (U+FF5C) and regular | (U+007C)
+_DSML_BLOCK_PATTERN = re.compile(
+    r'<[｜|]DSML[｜|]>?\s*function_calls?\s*\n(.*?)\n\s*<[｜|]DSML[｜|]>',
+    re.DOTALL
+)
+
+# Partial opening marker — used for streaming detection
+_DSML_OPEN_PATTERN = re.compile(r'<[｜|]DSML[｜|]>?\s*function_calls?')
+
+
+def parse_dsml_tool_calls(response_text: str) -> List[Dict[str, Any]]:
+    """
+    Parses tool calls in DeepSeek DSML format.
+    
+    DeepSeek models output tool calls wrapped in special DSML markers:
+        <｜DSML｜function_calls
+        [{"name": "get_weather", "arguments": {"city": "London"}}]
+        <｜DSML｜>
+    
+    Args:
+        response_text: Model response text
+    
+    Returns:
+        List of tool calls in OpenAI format
+    
+    Example:
+        >>> text = '<｜DSML｜function_calls\\n[{"name": "bash", "arguments": {"command": "ls"}}]\\n<｜DSML｜>'
+        >>> calls = parse_dsml_tool_calls(text)
+        >>> calls[0]["function"]["name"]
+        'bash'
+    """
+    if not response_text:
+        return []
+    
+    # Quick check: does it contain DSML markers?
+    if "DSML" not in response_text:
+        return []
+    
+    tool_calls = []
+    
+    for match in _DSML_BLOCK_PATTERN.finditer(response_text):
+        json_str = match.group(1).strip()
+        if not json_str:
+            continue
+        
+        try:
+            data = json.loads(json_str)
+            # Can be a single object or a list
+            if isinstance(data, dict):
+                data = [data]
+            
+            for item in data:
+                func_name = item.get("name", "")
+                arguments = item.get("arguments", {})
+                if isinstance(arguments, str):
+                    args_str = arguments
+                else:
+                    args_str = json.dumps(arguments)
+                
+                tool_calls.append({
+                    "id": generate_tool_call_id(),
+                    "type": "function",
+                    "function": {
+                        "name": func_name,
+                        "arguments": args_str
+                    }
+                })
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to parse DSML tool call JSON: {json_str[:200]}")
+    
+    return tool_calls
+
+
+def strip_dsml_markers(text: str) -> str:
+    """
+    Remove DSML tool call markers from text content.
+    
+    This is used in streaming mode to prevent raw DSML markers from
+    being sent to the client as regular content.
+    
+    Args:
+        text: Text that may contain DSML markers
+    
+    Returns:
+        Text with DSML blocks removed
+    """
+    if not text or "DSML" not in text:
+        return text
+    
+    # Remove complete DSML blocks
+    cleaned = _DSML_BLOCK_PATTERN.sub("", text)
+    
+    # Also remove partial opening markers (trailing at end of stream)
+    cleaned = _DSML_OPEN_PATTERN.sub("", cleaned)
+    
+    # Remove standalone closing markers
+    cleaned = re.sub(r'<[｜|]DSML[｜|]>', '', cleaned)
+    
+    return cleaned.strip()
+
+
+class DSMLStreamFilter:
+    """
+    Streaming filter that buffers and strips DSML tool call markers.
+    
+    In streaming mode, DSML markers arrive across multiple chunks.
+    This filter buffers content when a potential DSML block is detected,
+    and either strips the block (extracting tool calls) or releases
+    the buffered content if it turns out not to be a DSML block.
+    
+    Usage:
+        filter = DSMLStreamFilter()
+        for chunk in stream:
+            content, tool_calls = filter.feed(chunk)
+            if content:
+                yield content
+            if tool_calls:
+                handle_tool_calls(tool_calls)
+        # Flush remaining buffer
+        content, tool_calls = filter.flush()
+    """
+    
+    def __init__(self):
+        self._buffer = ""
+        self._in_dsml_block = False
+        self._tool_calls: List[Dict[str, Any]] = []
+    
+    def feed(self, text: str) -> tuple:
+        """
+        Feed a chunk of text through the filter.
+        
+        Returns:
+            Tuple of (filtered_content: str, tool_calls: list)
+        """
+        if not text:
+            return ("", [])
+        
+        self._buffer += text
+        
+        # Check if we're accumulating a DSML block
+        if self._in_dsml_block:
+            # Look for closing marker
+            close_match = re.search(r'<[｜|]DSML[｜|]>', self._buffer)
+            if close_match:
+                # Complete block found — extract tool calls
+                block_content = self._buffer[:close_match.start()]
+                remaining = self._buffer[close_match.end():]
+                
+                # Parse the JSON from the block
+                calls = self._parse_block_content(block_content)
+                self._tool_calls.extend(calls)
+                
+                self._buffer = remaining
+                self._in_dsml_block = False
+                
+                # Process remaining buffer recursively
+                if self._buffer:
+                    more_content, more_calls = self.feed("")
+                    return (more_content, calls + more_calls)
+                return ("", calls)
+            else:
+                # Still accumulating — don't emit anything yet
+                return ("", [])
+        
+        # Check if buffer contains start of DSML block
+        open_match = _DSML_OPEN_PATTERN.search(self._buffer)
+        if open_match:
+            # Emit content before the marker
+            before = self._buffer[:open_match.start()]
+            self._buffer = self._buffer[open_match.end():]
+            self._in_dsml_block = True
+            return (before, [])
+        
+        # Check for partial marker at end of buffer (e.g., "<｜DSM" waiting for more)
+        # Keep last 30 chars in buffer as potential partial marker
+        partial_markers = ["<｜DSML", "<|DSML", "<｜D", "<|D"]
+        for marker in partial_markers:
+            for i in range(1, len(marker) + 1):
+                if self._buffer.endswith(marker[:i]):
+                    emit = self._buffer[:-i]
+                    self._buffer = self._buffer[-i:]
+                    return (emit, [])
+        
+        # No DSML markers detected — emit everything
+        emit = self._buffer
+        self._buffer = ""
+        return (emit, [])
+    
+    def flush(self) -> tuple:
+        """
+        Flush remaining buffer content.
+        
+        Call this when the stream ends to get any remaining content.
+        
+        Returns:
+            Tuple of (remaining_content: str, tool_calls: list)
+        """
+        if self._in_dsml_block:
+            # Incomplete DSML block — try to parse what we have
+            calls = self._parse_block_content(self._buffer)
+            self._buffer = ""
+            self._in_dsml_block = False
+            if calls:
+                return ("", calls)
+            # If parsing failed, it wasn't a real DSML block — emit as content
+            # (already cleared buffer, nothing to emit)
+            return ("", [])
+        
+        emit = self._buffer
+        self._buffer = ""
+        return (emit, [])
+    
+    def _parse_block_content(self, content: str) -> List[Dict[str, Any]]:
+        """Parse JSON tool calls from DSML block content."""
+        # Remove the opening marker text if still present
+        cleaned = _DSML_OPEN_PATTERN.sub("", content).strip()
+        if not cleaned:
+            return []
+        
+        try:
+            data = json.loads(cleaned)
+            if isinstance(data, dict):
+                data = [data]
+            
+            calls = []
+            for item in data:
+                func_name = item.get("name", "")
+                arguments = item.get("arguments", {})
+                if isinstance(arguments, str):
+                    args_str = arguments
+                else:
+                    args_str = json.dumps(arguments)
+                
+                calls.append({
+                    "id": generate_tool_call_id(),
+                    "type": "function",
+                    "function": {
+                        "name": func_name,
+                        "arguments": args_str
+                    }
+                })
+            return calls
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to parse DSML block: {cleaned[:200]}")
+            return []

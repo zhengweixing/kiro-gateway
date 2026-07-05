@@ -36,7 +36,7 @@ import httpx
 from fastapi import HTTPException
 from loguru import logger
 
-from kiro.parsers import parse_bracket_tool_calls, deduplicate_tool_calls
+from kiro.parsers import parse_bracket_tool_calls, parse_dsml_tool_calls, deduplicate_tool_calls
 from kiro.utils import generate_completion_id
 from kiro.config import (
     FIRST_TOKEN_TIMEOUT,
@@ -275,7 +275,8 @@ async def stream_kiro_to_openai_internal(
         
         # Check bracket-style tool calls in full content
         bracket_tool_calls = parse_bracket_tool_calls(full_content)
-        all_tool_calls = tool_calls_from_stream + bracket_tool_calls
+        dsml_tool_calls = parse_dsml_tool_calls(full_content)
+        all_tool_calls = tool_calls_from_stream + bracket_tool_calls + dsml_tool_calls
         all_tool_calls = deduplicate_tool_calls(all_tool_calls)
         
         # Detect content truncation (missing completion signals)

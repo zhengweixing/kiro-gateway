@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Awaitable, Dict
 import httpx
 from loguru import logger
 
-from kiro.parsers import AwsEventStreamParser, parse_bracket_tool_calls, deduplicate_tool_calls
+from kiro.parsers import AwsEventStreamParser, parse_bracket_tool_calls, parse_dsml_tool_calls, deduplicate_tool_calls, DSMLStreamFilter
 from kiro.config import (
     FIRST_TOKEN_TIMEOUT,
     FIRST_TOKEN_MAX_RETRIES,
@@ -140,6 +140,9 @@ async def parse_kiro_stream(
     parser = AwsEventStreamParser()
     first_token_received = False
     
+    # Initialize DSML stream filter for DeepSeek models
+    dsml_filter = DSMLStreamFilter()
+    
     # Initialize thinking parser if fake reasoning is enabled
     thinking_parser: Optional[ThinkingParser] = None
     if FAKE_REASONING_ENABLED and enable_thinking_parser:
@@ -171,9 +174,19 @@ async def parse_kiro_stream(
             debug_logger.log_raw_chunk(first_byte_chunk)
         
         async for event in _process_chunk(parser, first_byte_chunk, thinking_parser):
-            if event.type == "content" or event.type == "thinking":
-                first_token_received = True
-            yield event
+            if event.type == "content" and event.content:
+                # Filter DSML markers from content
+                filtered_content, dsml_tools = dsml_filter.feed(event.content)
+                if filtered_content:
+                    first_token_received = True
+                    yield KiroEvent(type="content", content=filtered_content)
+                if dsml_tools:
+                    for tc in dsml_tools:
+                        yield KiroEvent(type="tool_use", tool_use=tc)
+            else:
+                if event.type == "thinking":
+                    first_token_received = True
+                yield event
         
         # Continue reading remaining chunks
         async for chunk in byte_iterator:
@@ -181,7 +194,24 @@ async def parse_kiro_stream(
                 debug_logger.log_raw_chunk(chunk)
             
             async for event in _process_chunk(parser, chunk, thinking_parser):
-                yield event
+                if event.type == "content" and event.content:
+                    # Filter DSML markers from content
+                    filtered_content, dsml_tools = dsml_filter.feed(event.content)
+                    if filtered_content:
+                        yield KiroEvent(type="content", content=filtered_content)
+                    if dsml_tools:
+                        for tc in dsml_tools:
+                            yield KiroEvent(type="tool_use", tool_use=tc)
+                else:
+                    yield event
+        
+        # Flush DSML filter
+        remaining_content, remaining_tools = dsml_filter.flush()
+        if remaining_content:
+            yield KiroEvent(type="content", content=remaining_content)
+        if remaining_tools:
+            for tc in remaining_tools:
+                yield KiroEvent(type="tool_use", tool_use=tc)
         
         # Finalize thinking parser and yield any remaining content
         if thinking_parser:
@@ -326,6 +356,11 @@ async def collect_stream_to_result(
     bracket_tool_calls = parse_bracket_tool_calls(full_content_for_bracket_tools)
     if bracket_tool_calls:
         result.tool_calls = deduplicate_tool_calls(result.tool_calls + bracket_tool_calls)
+    
+    # Check for DSML-style tool calls (DeepSeek)
+    dsml_tool_calls = parse_dsml_tool_calls(full_content_for_bracket_tools)
+    if dsml_tool_calls:
+        result.tool_calls = deduplicate_tool_calls(result.tool_calls + dsml_tool_calls)
     
     return result
 
