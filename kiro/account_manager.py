@@ -574,6 +574,14 @@ class AccountManager:
             self._dirty = True
             return True
         
+        except ValueError as e:
+            error_msg = str(e)
+            if "refresh token" in error_msg.lower() or "token" in error_msg.lower():
+                logger.error(f"Failed to initialize account {account_id}: {e}")
+                logger.error(f"  → Token is missing or expired. Please re-login with 'kiro' or 'kiro-cli login'.")
+            else:
+                logger.error(f"Failed to initialize account {account_id}: {e}")
+            return False
         except Exception as e:
             logger.error(f"Failed to initialize account {account_id}: {e}")
             return False

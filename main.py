@@ -496,8 +496,30 @@ async def lifespan(app: FastAPI):
             logger.warning(f"Failed to initialize account: {account_id}")
     
     if not initialized:
-        logger.error("Failed to initialize any account. Check your credentials.")
-        raise RuntimeError("Failed to initialize any account")
+        # Provide friendly diagnostic message
+        logger.error("")
+        logger.error("╔══════════════════════════════════════════════════════════════╗")
+        logger.error("║          ❌ Failed to initialize any account                ║")
+        logger.error("╠══════════════════════════════════════════════════════════════╣")
+        logger.error("║                                                              ║")
+        logger.error("║  Possible causes:                                            ║")
+        logger.error("║    1. Refresh token expired or missing                       ║")
+        logger.error("║    2. Credentials file is empty or corrupted                 ║")
+        logger.error("║    3. Network cannot reach auth endpoint                     ║")
+        logger.error("║                                                              ║")
+        logger.error("║  How to fix:                                                 ║")
+        logger.error("║    • Run 'kiro' or 'kiro-cli login' to re-authenticate       ║")
+        logger.error("║    • Then restart the gateway                                ║")
+        logger.error("║                                                              ║")
+        logger.error("║  If using SQLite (Kiro Desktop/CLI):                         ║")
+        logger.error("║    • Ensure ~/.local/share/kiro-cli/data.sqlite3 contains    ║")
+        logger.error("║      a valid token in auth_kv table                          ║")
+        logger.error("║    • Required key: kirocli:social:token (Social login)       ║")
+        logger.error("║      or kirocli:odic:token (AWS SSO OIDC)                    ║")
+        logger.error("║                                                              ║")
+        logger.error("╚══════════════════════════════════════════════════════════════╝")
+        logger.error("")
+        raise RuntimeError("Failed to initialize any account. See above for troubleshooting.")
     
     # Save initial state
     await app.state.account_manager._save_state()
