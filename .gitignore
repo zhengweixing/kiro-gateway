@@ -31,3 +31,5 @@ requests/
 .pytest_cache/
 .coverage
 htmlcov/
+# Virtual environment
+.venv/
