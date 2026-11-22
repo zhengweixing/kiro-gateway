@@ -362,6 +362,51 @@ docker-compose logs -f
 curl http://localhost:8000/health
 ```
 
+### Standalone Launch with kiro-cli Login (`start-docker.sh`)
+
+Runs the gateway in Docker using the token stored by `kiro-cli login`. No refresh token or API key is copied into the image or the compose file. The bundled `docker-compose.yml` is written for this launcher, so start it with `./start-docker.sh` instead of `docker-compose up`.
+
+**Prerequisites**
+
+- Docker with the Compose plugin.
+- `kiro-cli login` completed with an account login (Builder ID, Google/GitHub, or IAM Identity Center). A kiro-cli session that uses an API key does not write a token to `data.sqlite3`, and the gateway will fail to start.
+- A directory with two env files:
+  - `com.env`: the values you define, for example `PROXY_API_KEY=...`
+  - `kiro.env`: a copy of `.env.example` that may reference `com.env` values as `${VAR}`, for example `PROXY_API_KEY="${PROXY_API_KEY}"`
+
+**Run**
+
+```bash
+export KIRO_ENV_DIR=/path/to/dir-with-com.env-and-kiro.env   # default: ./docker/env
+./start-docker.sh
+curl http://localhost:52380/health
+```
+
+**What the script does**
+
+1. Replaces each `${VAR}` in `kiro.env` with the value from `com.env`, and writes the result to `docker/kiro.rendered.env` (mode 600, git-ignored). The script stops with an error if a variable is undefined.
+2. Sets `SERVER_PORT=8000` and `KIRO_CLI_DB_FILE=/home/kiro/.local/share/kiro-cli/data.sqlite3` for use inside the container.
+3. Mounts the kiro-cli data directory read-write, so refreshed tokens are written back to `data.sqlite3`, and mounts `KIRO_ENV_DIR` read-only at `/app/env`.
+4. Runs `docker compose up -d`.
+
+**Settings**
+
+Set these as environment variables, or as `KEY=value` lines in the git-ignored `.env`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `KIRO_ENV_DIR` | `./docker/env` | Directory containing `com.env` and `kiro.env` |
+| `KIRO_CLI_DIR` | macOS: `~/Library/Application Support/kiro-cli`<br>Linux: `~/.local/share/kiro-cli` | kiro-cli data directory containing `data.sqlite3` |
+| `HOST_PORT` | `52380` | Port on the host |
+
+Run `./start-docker.sh` again after you change `com.env` or `kiro.env`, because the rendered file is only generated at launch.
+
+**Troubleshooting**
+
+- `Missing .../data.sqlite3`: run `kiro-cli login`, or set `KIRO_CLI_DIR`.
+- Container restarts with `Refresh token is not set`: `auth_kv` has no token. Check with `sqlite3 <KIRO_CLI_DIR>/data.sqlite3 "select key from auth_kv;"`. You should see `kirocli:social:token` or `kirocli:odic:token`. If not, log out and log in again with an account.
+- `401` from the API: the `PROXY_API_KEY` you send must match the one in `com.env`.
+
 ### Docker Run (Without Compose)
 
 <details>

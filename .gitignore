@@ -33,3 +33,4 @@ requests/
 htmlcov/
 # Virtual environment
 .venv/
+docker/kiro.rendered.env
